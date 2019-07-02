@@ -3,24 +3,27 @@ package main
 
 import (
 	"fmt"
-		"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws"
 
-"time"
-		"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/ec2"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws/session"
+
+	_ "github.com/aws/aws-sdk-go/aws/client"
 
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 
 	"github.com/docopt/docopt-go"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 )
 
-const volumeIncreasePercent = 0.2
+const volumeIncreasePercent float64 = 0.2
 
 var version string
 
@@ -45,19 +48,17 @@ func safeRun(command []string, dryrun bool) string {
 		err    error
 	)
 	commandString := strings.Join(command, " ")
-	if dryrun == true {
-		log.Println("Would run: %s", commandString)
+	if dryrun {
+		log.Printf("Would run: %s\n", commandString)
 		return ""
 	}
-		if cmdOut, err = exec.Command(command[0], command[1:]...).Output(); err != nil {
-			log.Println("There was an error running %s\n", commandString)
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return string(cmdOut)
+	if cmdOut, err = exec.Command(command[0], command[1:]...).Output(); err != nil {
+		log.Printf("There was an error running %s\n", commandString)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return string(cmdOut)
 }
-
-
 
 func parseDfOutput(dfOutput string) (float64, error) {
 	lines := strings.Split(dfOutput, "\n")
@@ -79,15 +80,16 @@ func parseDfOutput(dfOutput string) (float64, error) {
 }
 
 func getEbsBlockDevices() []string {
-	md := ec2metadata.New(session.New())
-	if md.Available() == true {
+	sess, _ := session.NewSession()
+	md := ec2metadata.New(sess)
+	if md.Available() {
 		mapping, _ := md.GetMetadata("block-device-mapping")
 		log.Println(mapping)
 		// TODO: Filter only EBS
 		return []string{"/dev/xvda"}
-}
-		log.Println("ec2 metadata not available.")
-		return []string{}
+	}
+	log.Println("ec2 metadata not available.")
+	return []string{}
 
 }
 
@@ -108,64 +110,92 @@ func isModificiationComplete(state *ec2.VolumeModification) bool {
 	return aws.StringValue(state.ModificationState) == ec2.VolumeModificationStateCompleted
 }
 
-func waitForResize(d string) {
-	complete := false
-	for complete == false {
-		time.Sleep(60*time.Second)
-	volumeModification, err := d.describeVolumeModification()
+func describeVolumeModification(volumeID string, ec2Client *ec2.EC2) (*ec2.VolumeModification, error) {
+	request := &ec2.DescribeVolumesModificationsInput{
+		VolumeIds: []*string{&volumeID},
+	}
+	volumeMods, err := ec2Client.DescribeVolumesModifications(request)
+
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("error describing volume modification %s with %v", volumeID, err)
+	}
+
+	if len(volumeMods.VolumesModifications) == 0 {
+		return nil, fmt.Errorf("no volume modifications found for %s", volumeID)
+	}
+	lastIndex := len(volumeMods.VolumesModifications) - 1
+	return volumeMods.VolumesModifications[lastIndex], nil
+}
+
+func waitForResize(volumeID string, ec2Client *ec2.EC2) {
+	complete := false
+	for ! complete {
+		time.Sleep(60 * time.Second)
+		volumeModification, err := describeVolumeModification(volumeID, ec2Client)
+		if err != nil {
+			panic(err)
 		}
 		complete = isModificiationComplete(volumeModification)
 	}
 }
 
-func resizeEbsDevice(device string) {
+func resizeEbsDevice(device string, ec2Client *ec2.EC2, dryRun bool) {
 	log.Printf("Resizing EBS device %s!\n", device)
 	volumeID := "TBD"
-	existingSize := aws.Int64(0) // TBD
-	newSize := (existingSize) * (1.00 + volumeIncreasePercent)
+	var existingSize int64 // TBD
+	newSize := int64(math.Round(float64(existingSize) * (1.00 + volumeIncreasePercent)))
 	request := &ec2.ModifyVolumeInput{
-		VolumeId: volumeID.awsString(volumeID),
+		VolumeId: &volumeID,
 		Size:     aws.Int64(newSize),
 	}
-	output, err := d.ec2.ModifyVolume(request)
-	if err != nil {
-		log.Panicf("AWS modifyVolume failed for %s with %v", volumeID, err)
-	}
-	volumeModification := output.VolumeModification
-	if isModificiationComplete(volumeModification) {
+	if !dryRun {
+		output, err := ec2Client.ModifyVolume(request)
+		if err != nil {
+			log.Panicf("AWS modifyVolume failed for %s with %v", volumeID, err)
+		}
+		volumeModification := output.VolumeModification
+		if isModificiationComplete(volumeModification) {
+			return
+		}
+		waitForResize(volumeID, ec2Client)
 		return
 	}
-		waitForResize(volumeID)
-		return
-
 }
 
-func growPartition(partition string) {
-	log.Printf("growing parition %s!\n", partition)
-	safeRun([]string{"growpart", partition}, true)
+func growPartition(partition string, dryRun bool) {
+	log.Printf("Going to grow parition %s!\n", partition)
+	safeRun([]string{"growpart", partition}, dryRun)
 }
 
-func resizeFilesystem(partition string) {
-	log.Printf("Resizing filesystem on partition %s!\n", partition)
-	safeRun([]string{"resize2fs", partition}, true)
+func resizeFilesystem(partition string, dryRun bool) {
+	log.Printf("Going to resize filesystem on partition %s!\n", partition)
+	safeRun([]string{"resize2fs", partition}, dryRun)
 }
 
 func main() {
 	args := parseArgs()
 	verbose := args["--verbose"].(bool)
 	dryRun := args["--dryrun"].(bool)
+	fmt.Println(verbose)
+	fmt.Println(dryRun)
 
+	sess, err := session.NewSession(&aws.Config{
+		Region: aws.String("us-west-2")},
+	)
+	if err != nil {
+		fmt.Printf("error creating AWS EC2 client: %v", err)
+		os.Exit(1)
+	}
+	ec2Client := ec2.New(sess)
 
 	EbsBlockDevices := getEbsBlockDevices()
 	for _, device := range EbsBlockDevices {
 		log.Printf("Inspecting %s\n", device)
 		mount, partition := lookupMount(device)
 		if mountNeedsResizing(mount) {
-			resizeEbsDevice(device)
-			growPartition(partition)
-			resizeFilesystem(partition)
+			resizeEbsDevice(device, ec2Client, dryRun)
+			growPartition(partition, dryRun)
+			resizeFilesystem(partition, dryRun)
 		}
 	}
 }
