@@ -86,10 +86,10 @@ func getEbsBlockDevices() []string {
 	sess, _ := session.NewSession()
 	md := ec2metadata.New(sess)
 	if md.Available() {
-		mapping, _ := md.GetMetadata("block-device-mapping")
-		log.Println(mapping)
-		// TODO: Filter only EBS
-		return []string{"/dev/xvda"}
+		mapping, _ := md.GetMetadata("block-device-mapping/root")
+		log.Printf("(ignoring) Metadata mapping: '%+v'\n", mapping)
+		// TODO: Filter only EBS, actually work
+		return []string{"/dev/nvme0n1p1"}
 	}
 	log.Println("ec2 metadata not available.")
 	return []string{}
