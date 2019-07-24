@@ -2,18 +2,13 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
-
-	"github.com/aws/aws-sdk-go/service/ec2"
-	"time"
-
-	"github.com/aws/aws-sdk-go/aws/session"
-
 	_ "github.com/aws/aws-sdk-go/aws/client"
-
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
-
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/docopt/docopt-go"
 	"log"
 	"math"
@@ -21,6 +16,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const volumeIncreasePercent float64 = 0.2
@@ -129,7 +125,7 @@ func describeVolumeModification(volumeID string, ec2Client *ec2.EC2) (*ec2.Volum
 
 func waitForResize(volumeID string, ec2Client *ec2.EC2) {
 	complete := false
-	for ! complete {
+	for !complete {
 		time.Sleep(60 * time.Second)
 		volumeModification, err := describeVolumeModification(volumeID, ec2Client)
 		if err != nil {
@@ -176,8 +172,9 @@ func main() {
 	args := parseArgs()
 	verbose := args["--verbose"].(bool)
 	dryRun := args["--dryrun"].(bool)
-	fmt.Println(verbose)
-	fmt.Println(dryRun)
+	raw_threshold := args["--threshold"].(string)
+	threshold, _ := strconv.ParseFloat(raw_threshold, 64)
+	threshold = threshold / float64(100)
 
 	sess, err := session.NewSession(&aws.Config{
 		Region: aws.String("us-west-2")},
