@@ -39,21 +39,28 @@ Options:
 }
 
 func safeRun(command []string, dryrun bool) string {
-	var (
-		cmdOut []byte
-		err    error
-	)
 	commandString := strings.Join(command, " ")
 	if dryrun {
-		log.Printf("Would run: %s\n", commandString)
+		log.Printf("Would run: '%s'\n", commandString)
 		return ""
 	}
-	if cmdOut, err = exec.Command(command[0], command[1:]...).Output(); err != nil {
+	cmd := exec.Command(command[0], command[1:]...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	outStr, errStr := string(stdout.Bytes()), string(stderr.Bytes())
+
+	fmt.Fprintln(os.Stderr, string(outStr))
+	fmt.Fprintln(os.Stderr, string(errStr))
+	if err != nil {
+		exitError, _ := err.(*exec.ExitError)
+		log.Printf("%s exited %d", commandString, exitError.ExitCode())
 		log.Printf("There was an error running %s\n", commandString)
-		fmt.Fprintln(os.Stderr, err)
+		log.Print(err)
 		os.Exit(1)
 	}
-	return string(cmdOut)
+	return string(outStr)
 }
 
 func parseDfOutput(dfOutput string) (float64, error) {
