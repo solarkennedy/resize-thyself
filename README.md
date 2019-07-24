@@ -17,7 +17,7 @@ Well with `resize-thyself` you can at least pretend. It resizes your disks when 
 
 Sometimes you don't know how much disk you are going to need till you need it!
 
-Even if we could guess, it would be wasteful to provision it all at once. With `resize-theyself`, it grows "just in time".
+Even if we could guess, it would be wasteful to provision it all at once. With `resize-thyself`, it grows "just in time".
 
 #### What if a run-away process uses up all my disk and wastes tons of $$$?
 
@@ -34,7 +34,7 @@ Sorry though, you won't be able to shrink.
 ## Usage
 
 ```
-$ resize-theyself
+$ resize-thyself
 ...
 ```
 

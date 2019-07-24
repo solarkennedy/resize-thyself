@@ -1,4 +1,10 @@
-BINARY := resize-theyself
+BINARY := resize-thyself
+
+BINARY: *.go
+	go build .
+
+dryrun: BINARY
+	./resize-thyself --dryrun --threshold=0
 
 .PHONY: test
 test: lint
