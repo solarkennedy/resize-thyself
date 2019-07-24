@@ -26,14 +26,14 @@ var version string
 func parseArgs() map[string]interface{} {
 	usage := `resize-thyself - Automatically resize a block device under pressue
 Usage:
-  resize-theyself [-v] [-d]
+  resize-thyself [-v] [-d] [--threshold=<percent>]
 Options:
-  -v, --verbose                   Be more verbose [default: false]
-	-d, --dryrun                    Dry run (don't resize) [default: false]
-  -h, --help     Show this screen
-  --version     Show version
+  --threshold=<percent>        How full should the disk be before acting? [default: 90]
+  -v, --verbose                Be more verbose [default: false]
+  -d, --dryrun                 Dry run (don't resize) [default: false]
+  -h, --help                   Show this screen
+  --version                    Show version
 `
-
 	arguments, _ := docopt.Parse(usage, nil, true, version, false)
 	return arguments
 }
@@ -90,16 +90,21 @@ func getEbsBlockDevices() []string {
 }
 
 func lookupMount(device string) (string, string) {
-	partition := "/dev/xvda1"
-	mount := "/"
-	return partition, mount
+	out := safeRun([]string{"grep", "^" + device, "/proc/mounts"}, false)
+	numLines := strings.Count(out, "\n")
+	if numLines != 1 {
+		log.Printf("Ah! There was more than one mount with %v:\n%v", device, out)
+		os.Exit(1)
+	}
+	split := strings.Split(out, " ")
+	return split[0], split[1]
 }
 
-func mountNeedsResizing(mount string) bool {
+func mountNeedsResizing(mount string, threshold float64, verbose bool) bool {
 	df := safeRun([]string{"df", mount}, false)
 	percentUsed, _ := parseDfOutput(df)
-	log.Println(mount, " has a usage of ", percentUsed)
-	return percentUsed > 0.9
+	log.Println(mount, "has a usage of", percentUsed)
+	return percentUsed > threshold
 }
 
 func isModificiationComplete(state *ec2.VolumeModification) bool {
@@ -189,7 +194,7 @@ func main() {
 	for _, device := range EbsBlockDevices {
 		log.Printf("Inspecting %s\n", device)
 		mount, partition := lookupMount(device)
-		if mountNeedsResizing(mount) {
+		if mountNeedsResizing(mount, threshold, verbose) {
 			resizeEbsDevice(device, ec2Client, dryRun)
 			growPartition(partition, dryRun)
 			resizeFilesystem(partition, dryRun)
