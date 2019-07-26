@@ -152,8 +152,8 @@ func lookupMount(ebsDevice string) (string, string) {
 		os.Exit(1)
 	}
 	split := strings.Split(out, " ")
-	mount := split[0]
-	partition := split[1]
+	partition := split[0]
+	mount := split[1]
 	return mount, partition
 }
 
@@ -279,14 +279,19 @@ func resizeEbsDevice(ebsDevice string, ec2Client *ec2.EC2, instanceID string, dr
 }
 
 func parsePartitionIntoDeviceAndNumber(partition string) (string, string) {
-	device := partition[0:len(partition)-1]
+	device := partition[0 : len(partition)-1]
 	partitionNumber := partition[len(partition)-1:]
 	if _, err := strconv.Atoi(partitionNumber); err != nil {
 		log.Panicf("%v doesn't looks like a number? Should be the partition number of %s\n", partitionNumber, partition)
 	}
 	lastCharOfDevice := device[len(device)-1:]
-	if _, err := strconv.Atoi(lastCharOfDevice); err == nil {
-		log.Panicf("%v ends in a number? Should just be the device part of %s\n", partitionNumber, partition)
+	if lastCharOfDevice == "p" {
+		device = partition[0 : len(partition)-2]
+		lastCharOfDevice = device[len(device)-1:]
+	} else {
+		if _, err := strconv.Atoi(lastCharOfDevice); err == nil {
+			log.Panicf("%v ends in a number? Should just be the device part of %s\n", device, partition)
+		}
 	}
 	return device, partitionNumber
 }
