@@ -162,9 +162,47 @@ func waitForResize(volumeID string, ec2Client *ec2.EC2) {
 	}
 }
 
-func resizeEbsDevice(device string, ec2Client *ec2.EC2, dryRun bool) {
+func getEbsVolumeIDs(ec2Client *ec2.EC2, instanceID string) *ec2.DescribeVolumesOutput {
+	input := &ec2.DescribeVolumesInput{
+		Filters: []*ec2.Filter{
+			{
+				Name: aws.String("attachment.instance-id"),
+				Values: []*string{
+					aws.String(instanceID),
+				},
+			},
+		},
+	}
+
+	result, err := ec2Client.DescribeVolumes(input)
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			default:
+				fmt.Println(aerr.Error())
+			}
+		} else {
+			// Print the error, cast err to awserr.Error to get the Code and
+			// Message from an error.
+			fmt.Println(err.Error())
+		}
+		return result
+	}
+
+	fmt.Printf("Got these volumes attached to %s: %v\n", instanceID, result)
+	fmt.Println(result)
+	return result
+}
+
+func getEbsVolumeID(ec2Client *ec2.EC2, instanceID string) string {
+	volumes := getEbsVolumeIDs(ec2Client, instanceID)
+	fmt.Println(volumes)
+	return "vol-0ccaf7cfe4cf2cfc3"
+}
+
+func resizeEbsDevice(device string, ec2Client *ec2.EC2, instanceID string, dryRun bool) {
 	log.Printf("Resizing EBS device %s!\n", device)
-	volumeID := "TBD"
+	volumeID := getEbsVolumeID(ec2Client, instanceID)
 	var existingSize int64 // TBD
 	newSize := int64(math.Round(float64(existingSize) * (1.00 + volumeIncreasePercent)))
 	request := &ec2.ModifyVolumeInput{
