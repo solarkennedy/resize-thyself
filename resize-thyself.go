@@ -68,9 +68,7 @@ func parseDfOutput(dfOutput string) (float64, error) {
 	lines := strings.Split(dfOutput, "\n")
 	// The Header is the first line, our df should be the second line
 	dfLine := lines[1]
-
 	parsedLine := strings.Fields(dfLine)
-	log.Println(parsedLine)
 	total, err := strconv.ParseFloat(parsedLine[1], 64)
 	if err != nil {
 		return 0, err
@@ -102,16 +100,51 @@ func getEbsBlockDevices() []string {
 	md := ec2metadata.New(sess)
 	if md.Available() {
 		mapping, _ := md.GetMetadata("block-device-mapping/root")
-		log.Printf("(ignoring) Metadata mapping: '%+v'\n", mapping)
-		// TODO: Filter only EBS, actually work
-		return []string{"/dev/nvme0n1p1"}
+		log.Printf("Metadata mapping for root: '%+v'\n", mapping)
+		// TODO: Filter only EBS, actually work, return more than the root
+		return []string{mapping}
 	}
 	log.Println("ec2 metadata not available.")
 	return []string{}
 
 }
 
-func lookupMount(device string) (string, string) {
+func fileExists(filename string) bool {
+	info, err := os.Stat(filename)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return !info.IsDir()
+}
+
+// Takes into account
+// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/device_naming.html
+func mapEbsDeviceToLinuxDevice(ebsDevice string) string {
+	if ebsDevice == "/dev/sda1" {
+		if fileExists("/dev/nvme0n1p1") {
+			return "/dev/nvme0n1p1"
+		} else {
+			return "/dev/sda1"
+		}
+	} else if ebsDevice == "/dev/xvda" {
+		if fileExists("/dev/nvme0n1p1") {
+			return "/dev/nvme0n1p1"
+		} else {
+			return "/dev/xvda"
+		}
+
+	} else {
+		if fileExists(ebsDevice) {
+			return ebsDevice
+		} else {
+			log.Panicf("It looks like %s doesn't exist on the system?", ebsDevice)
+		}
+	}
+	return ebsDevice
+}
+
+func lookupMount(ebsDevice string) (string, string) {
+	device := mapEbsDeviceToLinuxDevice(ebsDevice)
 	out := safeRun([]string{"grep", "^" + device, "/proc/mounts"}, false)
 	numLines := strings.Count(out, "\n")
 	if numLines != 1 {
@@ -119,7 +152,9 @@ func lookupMount(device string) (string, string) {
 		os.Exit(1)
 	}
 	split := strings.Split(out, " ")
-	return split[0], split[1]
+	mount := split[0]
+	partition := split[1]
+	return mount, partition
 }
 
 func mountNeedsResizing(mount string, threshold float64, verbose bool) bool {
@@ -188,32 +223,52 @@ func getEbsVolumeIDs(ec2Client *ec2.EC2, instanceID string) *ec2.DescribeVolumes
 		}
 		return result
 	}
-
-	fmt.Printf("Got these volumes attached to %s: %v\n", instanceID, result)
-	fmt.Println(result)
 	return result
 }
 
-func getEbsVolumeID(ec2Client *ec2.EC2, instanceID string) string {
-	volumes := getEbsVolumeIDs(ec2Client, instanceID)
-	fmt.Println(volumes)
-	return "vol-0ccaf7cfe4cf2cfc3"
+func isEbsVolumeAttached(volume *ec2.Volume, ebsDevice string) bool {
+	for _, attachment := range volume.Attachments {
+		if *attachment.Device == ebsDevice {
+			return true
+		}
+	}
+	return false
 }
 
-func resizeEbsDevice(device string, ec2Client *ec2.EC2, instanceID string, dryRun bool) {
-	log.Printf("Resizing EBS device %s!\n", device)
-	volumeID := getEbsVolumeID(ec2Client, instanceID)
+func getEbsVolumeID(ec2Client *ec2.EC2, instanceID string, ebsDevice string) string {
+	volumes := getEbsVolumeIDs(ec2Client, instanceID).Volumes
+	for _, volume := range volumes {
+		if isEbsVolumeAttached(volume, ebsDevice) {
+			log.Printf("Looks like %s is attached to this instance %s as %s", *volume.VolumeId, instanceID, ebsDevice)
+			return *volume.VolumeId
+		}
+	}
+	log.Fatalf("No volumes look attached: %v", volumes)
+	return ""
+}
+
+func resizeEbsDevice(ebsDevice string, ec2Client *ec2.EC2, instanceID string, dryRun bool) {
+	log.Printf("Resizing EBS device '%s'!\n", ebsDevice)
+	volumeID := getEbsVolumeID(ec2Client, instanceID, ebsDevice)
 	var existingSize int64 // TBD
 	newSize := int64(math.Round(float64(existingSize) * (1.00 + volumeIncreasePercent)))
 	request := &ec2.ModifyVolumeInput{
 		VolumeId: &volumeID,
 		Size:     aws.Int64(newSize),
+		DryRun:   &dryRun,
 	}
-	if !dryRun {
-		output, err := ec2Client.ModifyVolume(request)
-		if err != nil {
+	output, err := ec2Client.ModifyVolume(request)
+	if err != nil {
+		if dryRun {
+			log.Printf("AWS modifyVolume for %s returned with %v", volumeID, err)
+		} else {
 			log.Panicf("AWS modifyVolume failed for %s with %v", volumeID, err)
 		}
+	}
+
+	if dryRun {
+		return
+	} else {
 		volumeModification := output.VolumeModification
 		if isModificiationComplete(volumeModification) {
 			return
@@ -253,13 +308,15 @@ func main() {
 	instanceID := getInstanceID(ec2Client)
 
 	EbsBlockDevices := getEbsBlockDevices()
-	for _, device := range EbsBlockDevices {
-		log.Printf("Inspecting %s\n", device)
-		mount, partition := lookupMount(device)
+	for _, ebsDevice := range EbsBlockDevices {
+		log.Printf("Inspecting ebs device %s\n", ebsDevice)
+		mount, partition := lookupMount(ebsDevice)
 		if mountNeedsResizing(mount, threshold, verbose) {
-			resizeEbsDevice(device, ec2Client, instanceID, dryRun)
+			resizeEbsDevice(ebsDevice, ec2Client, instanceID, dryRun)
 			growPartition(partition, dryRun)
 			resizeFilesystem(partition, dryRun)
+		} else {
+			log.Printf("%s doesn't need to be resized", mount)
 		}
 	}
 }
