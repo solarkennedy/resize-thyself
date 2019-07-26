@@ -294,11 +294,19 @@ func parsePartitionIntoDeviceAndNumber(partition string) (string, string) {
 func growPartition(partition string, dryRun bool) {
 	device, partitionNumber := parsePartitionIntoDeviceAndNumber(partition)
 	log.Printf("Going to grow parition %s!\n", partition)
-	safeRun([]string{"growpart", partition}, dryRun)
+	if dryRun {
+		safeRun([]string{"growpart", "--dry-run", device, partitionNumber}, false)
+	} else {
+		safeRun([]string{"growpart", device, partitionNumber}, false)
+	}
 }
 
 func resizeFilesystem(partition string, dryRun bool) {
-	log.Printf("Going to resize filesystem on partition %s!\n", partition)
+	if dryRun {
+		log.Printf("Would resize filesystem on partition %s\n", partition)
+	} else {
+		log.Printf("Going to resize filesystem on partition %s!\n", partition)
+	}
 	safeRun([]string{"resize2fs", partition}, dryRun)
 }
 
