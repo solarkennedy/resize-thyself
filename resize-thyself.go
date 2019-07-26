@@ -124,16 +124,21 @@ func mapEbsDeviceToLinuxDevice(ebsDevice string) string {
 	if ebsDevice == "/dev/sda1" {
 		if fileExists("/dev/nvme0n1p1") {
 			return "/dev/nvme0n1p1"
-		} else {
+		} else if fileExists("/dev/xvda1") {
+			return "/dev/xvda1"
+		} else if fileExists("/dev/sda1") {
 			return "/dev/sda1"
+		} else {
+			log.Panicf("AWS says the EBS device should be %s, but that doesn't exist?", ebsDevice)
 		}
-	} else if ebsDevice == "/dev/xvda" {
+	} else if ebsDevice == "/dev/xvda1" {
 		if fileExists("/dev/nvme0n1p1") {
 			return "/dev/nvme0n1p1"
+		} else if fileExists("/dev/xvda1") {
+			return "/dev/xvda1"
 		} else {
-			return "/dev/xvda"
+			log.Panicf("AWS says the EBS device should be %s, but that doesn't exist?", ebsDevice)
 		}
-
 	} else {
 		if fileExists(ebsDevice) {
 			return ebsDevice
