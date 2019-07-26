@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	_ "github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -80,6 +81,20 @@ func parseDfOutput(dfOutput string) (float64, error) {
 	}
 	return used / total, nil
 
+}
+
+func getRegion() string {
+	sess, _ := session.NewSession()
+	md := ec2metadata.New(sess)
+	region, _ := md.Region()
+	return region
+}
+
+func getInstanceID(ec2Client *ec2.EC2) string {
+	sess, _ := session.NewSession()
+	md := ec2metadata.New(sess)
+	id, _ := md.GetMetadata("instance-id")
+	return id
 }
 
 func getEbsBlockDevices() []string {
@@ -188,21 +203,23 @@ func main() {
 	threshold, _ := strconv.ParseFloat(raw_threshold, 64)
 	threshold = threshold / float64(100)
 
+	region := getRegion()
 	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String("us-west-2")},
+		Region: aws.String(region)},
 	)
 	if err != nil {
 		fmt.Printf("error creating AWS EC2 client: %v", err)
 		os.Exit(1)
 	}
 	ec2Client := ec2.New(sess)
+	instanceID := getInstanceID(ec2Client)
 
 	EbsBlockDevices := getEbsBlockDevices()
 	for _, device := range EbsBlockDevices {
 		log.Printf("Inspecting %s\n", device)
 		mount, partition := lookupMount(device)
 		if mountNeedsResizing(mount, threshold, verbose) {
-			resizeEbsDevice(device, ec2Client, dryRun)
+			resizeEbsDevice(device, ec2Client, instanceID, dryRun)
 			growPartition(partition, dryRun)
 			resizeFilesystem(partition, dryRun)
 		}
