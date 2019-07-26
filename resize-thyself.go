@@ -27,9 +27,10 @@ var version string
 func parseArgs() map[string]interface{} {
 	usage := `resize-thyself - Automatically resize a block device under pressue
 Usage:
-  resize-thyself [-v] [-d] [--threshold=<percent>]
+  resize-thyself [-v] [-d] [--threshold=<percent>] [--grow-percent=<percent>]
 Options:
   --threshold=<percent>        How full should the disk be before acting? [default: 90]
+  --grow-percent=<percent>     How much should we grow the disk? [default: 10]
   -v, --verbose                Be more verbose [default: false]
   -d, --dryrun                 Dry run (don't resize) [default: false]
   -h, --help                   Show this screen
@@ -52,10 +53,10 @@ func safeRun(command []string, dryrun bool) string {
 	err := cmd.Run()
 	outStr, errStr := string(stdout.Bytes()), string(stderr.Bytes())
 
-	fmt.Fprintln(os.Stderr, string(outStr))
-	fmt.Fprintln(os.Stderr, string(errStr))
 	if err != nil {
 		exitError, _ := err.(*exec.ExitError)
+		fmt.Fprintln(os.Stderr, string(outStr))
+		fmt.Fprintln(os.Stderr, string(errStr))
 		log.Printf("%s exited %d", commandString, exitError.ExitCode())
 		log.Printf("There was an error running %s\n", commandString)
 		log.Print(err)
@@ -160,7 +161,7 @@ func lookupMount(ebsDevice string) (string, string) {
 func mountNeedsResizing(mount string, threshold float64, verbose bool) bool {
 	df := safeRun([]string{"df", mount}, false)
 	percentUsed, _ := parseDfOutput(df)
-	log.Println(mount, "has a usage of", percentUsed)
+	log.Printf("%s has a usage of %.2f%%", mount, percentUsed*100)
 	return percentUsed > threshold
 }
 
@@ -188,10 +189,13 @@ func describeVolumeModification(volumeID string, ec2Client *ec2.EC2) (*ec2.Volum
 func waitForResize(volumeID string, ec2Client *ec2.EC2) {
 	complete := false
 	for !complete {
+		log.Print("Sleeping 60 seconds, waiting for EBS volume resize to finish...")
 		time.Sleep(60 * time.Second)
 		volumeModification, err := describeVolumeModification(volumeID, ec2Client)
 		if err != nil {
 			panic(err)
+		} else {
+			fmt.Println(volumeModification)
 		}
 		complete = isModificiationComplete(volumeModification)
 	}
@@ -235,23 +239,23 @@ func isEbsVolumeAttached(volume *ec2.Volume, ebsDevice string) bool {
 	return false
 }
 
-func getEbsVolumeID(ec2Client *ec2.EC2, instanceID string, ebsDevice string) string {
+func getEbsVolumeIDAndSize(ec2Client *ec2.EC2, instanceID string, ebsDevice string) (string, int64) {
 	volumes := getEbsVolumeIDs(ec2Client, instanceID).Volumes
 	for _, volume := range volumes {
 		if isEbsVolumeAttached(volume, ebsDevice) {
 			log.Printf("Looks like %s is attached to this instance %s as %s", *volume.VolumeId, instanceID, ebsDevice)
-			return *volume.VolumeId
+			return *volume.VolumeId, *volume.Size
 		}
 	}
 	log.Fatalf("No volumes look attached: %v", volumes)
-	return ""
+	return "", 0
 }
 
-func resizeEbsDevice(ebsDevice string, ec2Client *ec2.EC2, instanceID string, dryRun bool) {
-	log.Printf("Resizing EBS device '%s'!\n", ebsDevice)
-	volumeID := getEbsVolumeID(ec2Client, instanceID, ebsDevice)
-	var existingSize int64 // TBD
-	newSize := int64(math.Round(float64(existingSize) * (1.00 + volumeIncreasePercent)))
+func resizeEbsDevice(ebsDevice string, ec2Client *ec2.EC2, instanceID string, growPercent float64, dryRun bool) {
+	log.Printf("Resizing EBS device '%s' by %.2f%%!\n", ebsDevice, growPercent*100)
+	volumeID, existingSize := getEbsVolumeIDAndSize(ec2Client, instanceID, ebsDevice)
+	newSize := int64(math.Round(float64(existingSize) * (1.00 + growPercent)))
+	log.Printf("Growing EBS device '%s' by %.2f%% from %dGB to %dGB!\n", ebsDevice, growPercent*100, existingSize, newSize)
 	request := &ec2.ModifyVolumeInput{
 		VolumeId: &volumeID,
 		Size:     aws.Int64(newSize),
@@ -269,6 +273,7 @@ func resizeEbsDevice(ebsDevice string, ec2Client *ec2.EC2, instanceID string, dr
 	if dryRun {
 		return
 	} else {
+		time.Sleep(10 * time.Second)
 		volumeModification := output.VolumeModification
 		if isModificiationComplete(volumeModification) {
 			return
@@ -319,9 +324,14 @@ func main() {
 	args := parseArgs()
 	verbose := args["--verbose"].(bool)
 	dryRun := args["--dryrun"].(bool)
+
 	raw_threshold := args["--threshold"].(string)
 	threshold, _ := strconv.ParseFloat(raw_threshold, 64)
 	threshold = threshold / float64(100)
+
+	raw_grow_percent := args["--grow-percent"].(string)
+	grow_percent, _ := strconv.ParseFloat(raw_grow_percent, 64)
+	grow_percent = grow_percent / float64(100)
 
 	region := getRegion()
 	sess, err := session.NewSession(&aws.Config{
@@ -336,10 +346,11 @@ func main() {
 
 	EbsBlockDevices := getEbsBlockDevices()
 	for _, ebsDevice := range EbsBlockDevices {
-		log.Printf("Inspecting ebs device %s\n", ebsDevice)
 		mount, partition := lookupMount(ebsDevice)
+		log.Printf("Inspecting ebs device %s mounted on %s (real device name %s\n", ebsDevice, mount, partition)
 		if mountNeedsResizing(mount, threshold, verbose) {
-			resizeEbsDevice(ebsDevice, ec2Client, instanceID, dryRun)
+			log.Printf("%s is used more than our threshold (%.2f%%), resizing!", mount, threshold)
+			resizeEbsDevice(ebsDevice, ec2Client, instanceID, grow_percent, dryRun)
 			growPartition(partition, dryRun)
 			resizeFilesystem(partition, dryRun)
 		} else {
